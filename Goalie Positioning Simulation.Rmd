@@ -1,0 +1,276 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+
+```{r}
+# -------------------------
+#  USER-TUNABLE PARAMETERS
+# -------------------------
+A <- seq(-1.5,0, by = 0.1) # striker x coordinates
+B <- seq(0,3, by = 0.1)  # striker y coordinates
+
+E <- seq(0.165, 1.835, by = 0.01)  # discretized targets along the goal mouth
+v <- (1/0.66) * 3.2                # ball speed (leaps/sec) per your standardization
+t0 <- 0.11                         # reaction delay (seconds) - when goalie starts moving
+max_leap_time <- 0.66              # time to travel one leap (seconds)
+dt <- 0.02                         # time discretization step (seconds)
+P_x <- -1 + E                  # target x positions on goal line (y=0)
+n_shots <- length(E)
+
+# coarse grid search resolution
+x_grid <- seq(-1.5, 1.5, by = 0.02)   # candidate goalie x start positions
+y_grid <- seq(-0.02, 1.5, by = 0.02)   # candidate goalie y start positions
+
+# -------------------------
+    #  Build coarse grid of goalie starting positions
+    # -------------------------
+    grid_coarse <- expand.grid(x = x_grid, y = y_grid)
+    n_grid_coarse <- nrow(grid_coarse)
+    
+    
+
+
+# refine grid parameters
+refine_half_width_x <- 0.06  # how wide around coarse best to refine (leaps)
+refine_half_width_y <- 0.06
+refine_step <- 0.005         # refinement step resolution (leaps)
+
+#Storing results
+results_df <- data.frame(
+  striker_x = numeric(0),
+  striker_y = numeric(0),
+  goalie_x = numeric(0),
+  goalie_y = numeric(0),
+  goalie_prob = numeric(0)
+)
+
+# -------------------------
+#  radius function: corrected two-step (vectorized)
+#  l := ifelse(t <= t0, 0, t - t0)
+#  u := ifelse(l < max_leap_time, l, max_leap_time)
+#  r := u / max_leap_time  (radius in leaps, between 0 and 1)
+# -------------------------
+r_of_t <- function(t){
+  # returns radius in leaps
+  # 0 for t <= t0; grows linearly as (t - t0)/0.66 until capped at 1
+  r <- ifelse(
+    t <= t0, 0, pmin( (t-t0) / max_leap_time, 1.0))
+  return(r)
+}
+
+
+
+for(a in A){
+  for(b in B){
+    cat("Simulating striker at (", a, "," , b, ")\n")
+    
+    coverage_counts_coarse <- integer(n_grid_coarse)  # how many shots saved
+
+    # -------------------------
+    #  Derived / precomputed shot geometry
+    # -------------------------
+    
+    dx <- P_x - a
+    dy <- -b
+    d_e <- sqrt(dx^2 + b^2)        # distance striker -> target for each shot
+    d_e[d_e == 0] <- 1e-12
+    ux <- dx / d_e                 # shot unit x-direction
+    uy <- dy / d_e                 # shot unit y-direction (negative value)
+    T_e <- d_e / v                 # time for each shot to reach goal line
+
+    
+    
+    # -------------------------
+    #  MAIN LOOP (coarse): for each shot, precompute time steps and radii, evaluate vectorized distances
+    #  We precompute time steps and r_vals for each shot to skip tt where r==0.
+    # -------------------------
+    for(j in seq_len(n_shots)){
+      Tj <- T_e[j]
+      # discretize time from 0 to Tj (inclusive). If Tj < dt, include at least 0 and Tj.
+      if(Tj <= 0){
+        next
+      }
+      t_steps <- seq(0, Tj, by = dt)
+      if(tail(t_steps, 1) < Tj) t_steps <- c(t_steps, Tj)
+      r_vals <- r_of_t(t_steps)    # vector of radii (leaps) corresponding to times
+      # skip times where radius is zero (before reaction)
+      use_idx <- which(r_vals > 0)
+      if(length(use_idx) == 0){
+        # no time during flight where goalie has positive radius -> cannot save this shot
+        next
+      }
+      # Precompute constants for shot direction
+      uxj <- ux[j]; uyj <- uy[j]
+      # For each shot we keep a boolean saved_by_grid indicating if each grid point can save this shot
+      saved_by_grid <- rep(FALSE, n_grid_coarse)
+      # Evaluate only the (few) time steps after reaction: vectorized across grid
+      for(k in use_idx){
+        tt <- t_steps[k]
+        rtt <- r_vals[k]
+        # ball position at time tt (one vector calculation)
+        Sx <- a + v * tt * uxj
+        Sy <- b + v * tt * uyj
+        dxg <- grid_coarse$x - Sx
+        dyg <- grid_coarse$y - Sy
+        dist_to_ball <- sqrt(dxg * dxg + dyg * dyg)
+        can_save_now <- dist_to_ball <= rtt
+        # update saved_by_grid - once TRUE it stays TRUE for this shot
+        newly_saved <- which(can_save_now & !saved_by_grid)
+        if(length(newly_saved) > 0){
+          saved_by_grid[newly_saved] <- TRUE
+          # minor optimization: if all grid points already can save this shot, stop time loop
+          if(all(saved_by_grid)) break
+        }
+      } # end time loop
+      # accumulate coverage counts
+      coverage_counts_coarse <- coverage_counts_coarse + as.integer(saved_by_grid)
+      if(j %% 50 == 0) cat("Coarse processed shot", j, " / ", n_shots, "\n")
+    } # end shot loop
+    
+    # attach probabilities to grid
+    prob_coarse <- coverage_counts_coarse / n_shots
+    grid_coarse$prob <- prob_coarse
+    
+    # coarse best
+    max_p_coarse <- max(prob_coarse)
+    best_idx_coarse <- which(prob_coarse == max_p_coarse)
+    best_pts_coarse <- grid_coarse[best_idx_coarse, , drop = FALSE]
+    cat("Coarse best probability:", max_p_coarse, "found at", nrow(best_pts_coarse), "grid point(s)\n")
+    
+    # -------------------------
+    #  REFINEMENT: build a fine grid around best coarse points and re-evaluate
+    # -------------------------
+    # build bounding box around all coarse best points
+    cx <- mean(best_pts_coarse$x)
+    cy <- mean(best_pts_coarse$y)
+    x_refine_seq <- seq(cx - refine_half_width_x, cx + refine_half_width_x, by = refine_step)
+    y_refine_seq <- seq(cy - refine_half_width_y, cy + refine_half_width_y, by = refine_step)
+    grid_refine <- expand.grid(x = x_refine_seq, y = y_refine_seq)
+    # remove any points outside a reasonable domain if you wish (not necessary)
+    n_grid_refine <- nrow(grid_refine)
+    coverage_counts_refine <- integer(n_grid_refine)
+    
+    # Evaluate refine grid using same loop pattern (vectorized over grid)
+    for(j in seq_len(n_shots)){
+      Tj <- T_e[j]
+      if(Tj <= 0) next
+      t_steps <- seq(0, Tj, by = dt)
+      if(tail(t_steps,1) < Tj) t_steps <- c(t_steps, Tj)
+      r_vals <- r_of_t(t_steps)
+      use_idx <- which(r_vals > 0)
+      if(length(use_idx) == 0) next
+      uxj <- ux[j]; uyj <- uy[j]
+      saved_by_grid <- rep(FALSE, n_grid_refine)
+      for(k in use_idx){
+        tt <- t_steps[k]
+        rtt <- r_vals[k]
+        Sx <- a + v * tt * uxj
+        Sy <- b + v * tt * uyj
+        dxg <- grid_refine$x - Sx
+        dyg <- grid_refine$y - Sy
+        dist_to_ball <- sqrt(dxg * dxg + dyg * dyg)
+        can_save_now <- dist_to_ball <= rtt
+        newly_saved <- which(can_save_now & !saved_by_grid)
+        if(length(newly_saved) > 0){
+          saved_by_grid[newly_saved] <- TRUE
+          if(all(saved_by_grid)) break
+        }
+      }
+      coverage_counts_refine <- coverage_counts_refine + as.integer(saved_by_grid)
+      if(j %% 50 == 0) cat("Refine processed shot", j, " / ", n_shots, "\n")
+    }
+    
+    prob_refine <- coverage_counts_refine / n_shots
+    grid_refine$prob <- prob_refine
+    
+    max_p_refine <- max(prob_refine)
+    best_idx_refine <- which(prob_refine == max_p_refine)
+    best_pts_refine <- grid_refine[best_idx_refine, , drop = FALSE]
+    
+    best_x <- best_pts_refine$x
+    best_y <- best_pts_refine$y
+    best_prob <- max_p_refine
+    
+    results_df <- rbind(
+      results_df,
+      data.frame(
+        striker_x = a,
+        striker_y = b,
+        goalie_x = best_x,
+        goalie_y = best_y,
+        goalie_prob = best_prob,
+        stringsAsFactors = F
+      )
+    )
+
+  }
+}
+
+#-------------------------
+# Visualizing the Data
+#-------------------------
+
+#Because the field is symmetric we can reflect the solutions over to the positive integers
+symetric_y <- c(results_df$goalie_y, results_df$goalie_y)
+symetric_x <- c(results_df$goalie_x,-results_df$goalie_x)
+df <- data.frame(symetric_x, symetric_y)
+
+#Plot of the best goalie positions
+ggplot(df,  aes(symetric_x, symetric_y))+
+  geom_point( size = 0.5)+
+  scale_color
+
+
+#Approximated Vector Field of striker position to best goalie position
+#Vectors have been normalized to a 1/10 of a unit vector for clarity. Color represents magnitude.
+
+#normalizing vectors
+vec_x <- results_df$goalie_x - results_df$striker_x
+vec_y <- results_df$goalie_y - results_df$striker_y
+
+magnitude <- sqrt((vec_x^2 + vec_y^2))
+
+vec_x <- (vec_x/magnitude)/10 #for readability the size of each vector is reduced to a tenth of a single unit
+vec_y <- (vec_y/magnitude)/10
+
+
+ggplot(results_df,  aes(goalie_x, goalie_y, colour = ))+
+  geom_point(size = 0.75, 
+             aes(goalie_x, goalie_y, colour = striker_x),
+             alpha = 0.4, 
+             color = "blue") + 
+  
+  geom_count(size = 0.75, alpha = 0.05,
+             aes(goalie_x, goalie_y, color = striker_y), 
+             colour = "red")
+
+#plotting
+ggplot(results_df,
+       aes(x = striker_x, y = striker_y)) +
+  
+  geom_segment(arrow = arrow(length = unit(0.01, "cm")), 
+               aes(x = striker_x, y = striker_y, xend = (striker_x + vec_x), 
+                   yend = (striker_y + vec_y), 
+                   colour = magnitude)) +
+  
+  scale_color_gradient(low = "green3",
+                       high = "red")
+
+#3d graph including probability as the z axis
+library(rgl)
+plot3d(x = results_df$goalie_x,
+       y = results_df$goalie_y,
+       z = results_df$goalie_prob)
+
+```
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.

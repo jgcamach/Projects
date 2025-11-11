@@ -1,0 +1,322 @@
+---
+title: "FBFTX Analysis"
+output:
+  pdf_document: default
+  html_notebook: default
+  
+---
+
+
+
+```{r Initialize, include=FALSE}
+#**The following code aims to analyze the performance of several mutual funds listed by American Funds Capital Group.*
+AMBFX = 1
+FBFTX = 2
+
+fund = 2
+
+######################################################################
+######################################################################
+library(tidyverse)
+library(ggplot2)
+library(Hmisc)
+library(magrittr)
+library(tseries)
+library(forecast)
+library(knitr)
+
+FBFTX = read.csv("C:/R_Files/Financial Model/FBFTX_Historic_Price.csv")
+AMBFX = read.csv("C:/R_Files/Financial Model/AMBFX_Historic_Price.csv")
+
+portfolio = llist(AMBFX,FBFTX)
+#portfolio = c(FBFTX, AMBFX, CAIFX, AMEFX, ABNFX, GFFFX)
+##year over year change##
+delchange = function(n) {
+  return(n/c(n[1],n[-length(n)]))
+}
+
+lndif = function(x){
+  y = x %>% log() %>% diff(1)
+  return(y*100)
+  }
+
+
+
+transform = function(a) {
+  percentchange = delchange(a$Adjusted.Close)[-1]
+  delln = lndif(a$Adjusted.Close)
+  a = a[-1,]
+  ##Adding, Removing, and Renaming columns from data##
+  a = mutate(a, Date = as.Date(a$Date, '%m/%d/%Y'))
+  a = mutate(a, "Percent Change" = percentchange-1, "Log First Difference" = delln)
+  a = mutate(a, Volume = NULL, High = NULL, Low = NULL, Open = NULL, 'Closing Price' = NULL)
+  a = rename(a, "Closing Price" = "Close.Last", "Adjusted Close" = "Adjusted.Close")
+}
+
+portfolio = lapply(portfolio, transform)
+
+df = portfolio[[fund]]
+df = arrange(df, df$Date)
+logdif = ts(df["Log First Difference"], start = 2015, end = 2025, frequency = 250)
+```
+
+
+```{r Descriptive Stats 1, include=FALSE}
+d = decompose(logdif, type = "additive")
+
+  
+
+variables = colnames(df[2:ncol(df)])
+means = numeric(length(variables))
+sd = numeric(length(variables))
+median = numeric(length(variables))
+
+for(i in seq_along(variables)){
+  varname = variables[i]
+  series = df[[varname]]
+  means[i] = mean(series,na.rm = TRUE)
+  sd[i] = sd(series, na.rm = TRUE)
+  median[i] = median(series, na.rm = TRUE)
+}
+```
+```{r echo=FALSE}
+#Descriptive Stats
+
+sumstat = data.frame(Mean = means,
+                     Standard_Deviation = sd, 
+                     Median = median,
+                     row.names = variables
+                     )
+kable(sumstat, format = "latex", caption = "Summary Statistics")
+logma = ma(df$`Log First Difference`, order = 90)
+
+```
+
+
+
+```{r include=FALSE}
+rearrange = function(df) {
+   s = group_by(df, month = month(`Date`), year = year(`Date`), day = wday(`Date`, label = TRUE))
+}
+
+
+facetable = function(df) {
+  datlong = gather(df[c("Date",
+                        "Adjusted Close",
+                        "Log First Difference",
+                        "Percent Change")], key = "variable", value = "value", -Date)
+}
+
+fac_fund = facetable(df)
+```
+
+```{r Data VIZ, echo=FALSE}
+#**Visualizing Data*
+##View Time series of Closing Price versus the percent change and Log first difference##
+plotfacet = function(datlong) {
+ ggplot(datlong, aes(Date, value, color = variable))+
+    geom_line(linewidth = 0.3)+
+    scale_color_manual(values = c("coral","#af6eff","steelblue"))+
+    facet_grid(vars(variable), scales = "free_y", labeller = label_value)+
+    labs(x = "Date",
+         y = ifelse(fund == 1, "AMBFX", "FBFTX")
+         )
+}
+```
+
+
+```{r echo=FALSE}
+
+s = rearrange(df)
+
+a = aggregate(s["Log First Difference"], by = list(s$day), FUN = mean) 
+b = aggregate(s["Log First Difference"], by = list(s$day), FUN = sd)
+c = aggregate(s["Log First Difference"], by = list(s$day), FUN = median)
+statbyday = merge(a,b, by = 1, sort = F)%>%
+                merge(c,by = 1, sort = F)%>%
+                  rename( "Mean" = "Log First Difference.x",
+                          "Median" = "Log First Difference",
+                          "Standard Deviation" = "Log First Difference.y"
+                          )
+rm(a,b,c)
+kable(statbyday, format = "latex", caption = "Summary Statistics")
+```
+
+
+```{r Data Viz 2, include=FALSE}
+##***                       Data Visualization                          **#
+library(paletteer)
+library(palettetown)
+library(patchwork)
+vizdata = function(s) {
+
+  s = rearrange(s)
+  
+  p1 =  ggplot(s,
+               aes(Date,`Log First Difference`,color = factor(month)))+
+        geom_point(size = 1.5)+
+        scale_color_poke(pokemon = 144)+
+        theme_dark()+
+        labs(title = ,
+             color = "Month",
+             x = "Date",
+             y = "Log First Difference")
+      
+  #Plotting Percent change by day of the week
+  library(ggridges)
+  p2 = s %>%
+  ggplot(aes(x = s$`Percent Change`, y = factor(s$day), fill = s$day))+
+    geom_density_ridges(stat = "binline", binwidth = 0.0007)+
+    theme_ridges()+
+    paletteer::scale_fill_paletteer_d("PNWColors::Sunset")+
+    theme_minimal()+
+    labs(title = "Comparing Histograms of Percent Change by Day",
+         x = "Percent Change",
+         y = "Day"
+  ) # Label for fill legend
+  
+  ##Histogram of Percent Change##
+  p3 = ggplot(s, aes(x = `Percent Change`)) + 
+    geom_histogram(binwidth = 0.001,aes( fill = after_stat(count)), show.legend = FALSE)+  # Set bin width and transparency
+    scale_fill_gradient(low = "royalblue", high = "coral") +  # Gradient from low to high counts
+    labs(title = "Histogram of Percent Change",
+         x = "Percent Change",
+         y = "Frequency",
+         fill = "Count") +  # Label for fill legend
+    theme_minimal()
+  
+  
+  ##Grouping Percent change by Month and Density at each point##
+  p4 = s %>%
+  ggplot(aes('Month', 'Percent Change', color = (`Percent Change`)))+
+    geom_count(aes(factor(`month`),`Percent Change`))+
+    scale_size(range = c(1,5))+
+    scale_x_discrete()+
+    paletteer::scale_color_paletteer_c("ggthemes::Sunset-Sunrise Diverging")+
+    labs(title = "Percent Change by Month",
+         x = "Month",
+         y = "Percent Change",
+         fill = "Count") +  # Label for fill legend
+    theme_minimal()
+  
+
+  #p5 = ggplot(s) +
+   # geom_density(aes(x = `Percent Change`*100,
+     #                y = after_stat(density)),
+    #                 fill = "#bffff2") +
+   # geom_density(aes(x = `Log First Difference`,
+      #               y = -after_stat(density)),
+     #                fill = "coral") +
+   # labs(title = "Frequency of the Log First Difference",
+    #     x = "Log 1st difference of Closing Price",
+    #     y = "Frequency")+
+   # geom_hline(yintercept = 0)+
+   # coord_cartesian(ylim = c(-1,1))+
+   # labs(x = "Change in Price",
+      #   color = c("Percent Change", "Log First Difference"))
+    
+return(list(p1,p2,p3,p4))
+}
+```
+
+
+```{r echo=FALSE, fig.height=4, fig.width=6, out.width="90%"}
+plot(logma)
+vizdata(df)
+plotfacet(fac_fund)
+cat("\n")
+plot(d)
+
+
+```
+
+```{r echo=FALSE, fig.height=4, fig.width=5, out.width="90%"}
+#**Descriptive Statistics*
+#Autocorrelation Function
+ggAcf(df$`Log First Difference`,
+      lag.max = length(df$Date),
+      plot = T
+      )+
+  labs(title = "Log Difference ACF")
+cat("\n")
+ggPacf(df$`Log First Difference`,
+      lag.max = length(df$Date),
+      plot = T)+
+  labs(title = "Log Price PACF")
+cat("\n")
+ggAcf(df$`Closing Price`,
+      lag.max = length(df$Date),
+      plot = T)+
+  labs(title = "Closing Price ACF")
+cat("\n")
+ggPacf(df$`Closing Price`,
+      lag.max = length(df$Date),
+      plot = T)+
+  labs(title = "Closing Price PACF")
+```
+
+
+
+```{r eval=FALSE, include=FALSE}
+
+#Are the outliers in March from the same year?
+#outlier_df <- df %>%
+  #filter(`Percent Change` > 1.05 | `Percent Change` < 0.975) %>%  # Filter outliers
+  #select(Date, `Percent Change`)  # Select relevant columns
+
+#print(outlier_df)
+#print('To observe whether there may be seasonal effects by month, a heuristic  is to view observations by month. Taking a loose interpretation of outlier being above greater than a 1.5 percent change or less than a 0.95 percent change we see that the outliers all occurred during the same year suggesting that there are no seasonal effects by month. This does not mean none exist, just that a more specific time frame may be necessary to observe such effects. Also, the outliers are explaine by some external event, namely the covid pandemic. Other outliers seem to be one off occurences within their year.')
+```
+
+```{r ARIMA Analysis Results, include=FALSE}
+#Analysis
+library(vars)
+
+adf = adf.test(df$`Log First Difference`)
+arma_model = arima(na.omit(d$random), order = c(3,0, 1))
+```
+
+
+```{r ARIMA Analysis 2, echo=FALSE, warning=FALSE, next_page=TRUE}
+
+print(adf)
+plot(arma_model)
+```
+
+
+```{r ARIMA Analysis, eval=FALSE, include=FALSE}
+set.seed(2355)
+
+t = 10000
+burn_in = 10000
+e = rnorm(t + burn_in, mean = 0, sd = 1)
+y = numeric(t + burn_in)
+
+
+for (i in 4:(t+burn_in)){
+y[i] = -0.0002 -0.9808*y[i-1] -0.0004*y[i-2] + 0.1320*y[i-3] + e[i] + 0.9033*e[i-1]
+}
+
+y = y[(burn_in+1):length(y)]
+
+lags = 0:3
+
+y_mean = mean(y)
+
+acovtest = numeric(length(lags))
+
+for (i in seq_along(lags)) {
+  h = lags[i]
+  n = length(y) - i
+  acovtest[i] = mean((y[1:n] - y_mean) * (y[(1 + i):(n + i)] - y_mean))
+}
+acov = acf(y, lag.max = 3)
+
+ARMAacf(y)
+acovtest
+acov$acf[2:4]
+
+
+
+```
+
