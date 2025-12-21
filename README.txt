@@ -2,8 +2,10 @@
 
 This repository contains R and Python projects analyzing economic and mathematical problems alongside projects that illustrate my coding capabilities.
 
-- **Website Production Efficiency:** Econometric analysis using R.
-- **Deposit Insurance Experiment:** Behavioral economics experiment using Veconlab data.
+- **Website Production Efficiency:** Econometric analysis of website production time using R.
+- **Deposit Insurance Experiment:** Behavioral economics experiment using data from Veconlab data in r.
 - **Steam Webscraper:** Python script collecting data on top-selling games.
+- **Goalie Save Simulation:** Simulating striker shots and the finding the best goalie position. 
+    Also see https://www.desmos.com/geometry/cgv9fxka9x for a visualized model of the same problem. It's definitely worth a look.
+- **Mutual Fund Analysis:** Analyzing a mutual fund using time series analysis in R.
 
-- **Mutual Fund Analysis** Analyzing a mutual fund using time series analysis in R.
